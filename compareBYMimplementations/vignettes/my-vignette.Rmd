@@ -1,0 +1,249 @@
+---
+title: "Coverage Simulation to Compare BYM implementations"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{my-vignette}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+```{r knit_init, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+## What this vignette explains
+
+This vignette is supplementary material for the article "Coverage of Effect Estimates of Besag-York-Mollié Algorithm in Up-To-Date R Implementations".
+
+We publish our source code both to enable you to replicate our research and to give examples of the function calls for further application.
+
+
+## Loading required dependencies
+```{r setup}
+  library("compareBYMimplementations")
+  library("rstan")
+  library("tidyverse")
+```
+
+
+
+## Generating a list of all simulation parameter combinations
+```{r param}
+load(file.path(find.package("compareBYMimplementations"), "data", "shape_GER.Rdata"))
+
+basic_round <- do.call(what = rbind,
+                       args = list(data.frame(region = "3",
+                                              seed_risk = 1000+1:109),
+                                   data.frame(region = "9",
+                                              seed_risk = 1000+1:52),
+                                   data.frame(region = "D",
+                                              seed_risk = 1000+1:14)))
+basic_round$region_ID <- 1:nrow(basic_round)
+
+
+sim_param <- expand.grid(region_ID = basic_round$region_ID,
+                         n_convolution = c(2, 4, 6),
+                         rate_per_100k = 2^(0:7))
+
+running_df <- dplyr::left_join(x = basic_round,
+                               y = sim_param,
+                               by = "region_ID")
+
+running_df$seed_poisson <- running_df$seed_risk + 1000
+running_df$region <- as.character(running_df$region)
+running_df$simulation_ID <- 1:nrow(running_df)
+
+print(as_tibble(running_df[(1:8)*475, ]))
+```
+
+
+
+## Generating a sample shapefile
+... if this was an application on real data, you would submit your own shapefile with data here. For our simulations, we iterated through all rows of the parameter data.frame
+
+```{r shapefile}
+    my_running_ID <- 1234
+
+    running_param = list(region        = running_df$region[my_running_ID],
+                         ID            = my_running_ID,
+                         seed_risk     = running_df$seed_risk[my_running_ID],
+                         seed_poisson  = running_df$seed_poisson[my_running_ID],
+                         n_convolution = running_df$n_convolution[my_running_ID],
+                         rate_per_100k = running_df$rate_per_100k[my_running_ID])
+
+    running_param <- append(x = running_param,
+                            values = list(n = switch (running_param$region,
+                                                      "9" = 96,
+                                                      "3" = 46,
+                                                      "D" = 402)))
+    states_codes <- switch (running_param$region,
+                            "9" = 9,
+                            "3" = 3,
+                            "D" = 1:16)
+
+    shape_D <- artificial_risk(shapefile     = shape_GER[substr(shape_GER@data$region_ID, 1, 2) %in% sprintf("%02d", states_codes), ],
+                               n_convolution = running_param$n_convolution,
+                               rate_per_100k = running_param$rate_per_100k,
+                               seed_risk     = running_param$seed_risk,
+                               seed_poisson  = running_param$seed_poisson)
+```
+
+
+## Prepare Stan for running
+```{r stanconf, cache=TRUE}
+write(x    = compareBYMimplementations::model_STAN_bym(),
+      file = file.path("my_dir/stan",
+                       "my_bym.stan"))
+write(x    = compareBYMimplementations::model_STAN_bym2(),
+      file = file.path("my_dir/stan",
+                       "my_bym2.stan"))
+
+
+options(mc.cores = 2);
+rstan_options("auto_write" = TRUE)
+Sys.setenv(LOCAL_CPPFLAGS = '-march=native')
+
+
+bym_stan  = rstan::stan_model(file = file.path("my_dir/stan",
+                                               "my_bym.stan"),
+                              model_name = "my_bym")
+bym2_stan = rstan::stan_model(file = file.path("my_dir/stan",
+                                               "my_bym2.stan"),
+                              model_name = "my_bym2")
+```
+
+
+## Calling of BYM implementations
+we wrote functions smooth_... that unify the function calls of the different implementations.
+For infomration on the details of the function calls, we would like to refer to the source code of these functions.
+
+Using these calling functions, the BYM calculations are
+
+```{r callBYM, cache=TRUE, results='hide', echo=TRUE, warning=FALSE}
+   res_INLA_bym1 <- smooth_inla(formula      = O ~ E + region_ID,
+                                 data         = shape_D@data,
+                                 shapefile    = shape_D,
+                                 INLA_model   = "bym",
+                                 BUGS_tempdir = "my_dir/bugs",
+                                 time_scaling = 1)
+
+    res_INLA_bym2 <- smooth_inla(formula      = O ~ E + region_ID,
+                                 data         = shape_D@data,
+                                 shapefile    = shape_D,
+                                 INLA_model   = "bym2",
+                                 BUGS_tempdir = "my_dir/bugs",
+                                 time_scaling = 1)
+
+    res_BUGS_bym <-  smooth_bugs(formula      = O ~ E + region_ID,
+                                 data         = shape_D@data,
+                                 shapefile    = shape_D,
+                                 INLA_model   = "bym2",
+                                 BUGS_tempdir = "my_dir",
+                                 time_scaling = 1)
+    
+    
+    res_STAN_bym  <- smooth_stan(formula        = O ~ E + region_ID,
+                                 data           = shape_D@data,
+                                 shapefile      = shape_D,
+                                 STAN_dir       = "my_dir/stan",
+                                 STAN_cores     = 2,
+                                 STAN_bym_model = bym_stan)
+    
+    res_STAN_bym2 <- smooth_stan(formula        = O ~ E + region_ID,
+                                 data           = shape_D@data,
+                                 shapefile      = shape_D,
+                                 STAN_dir       = "my_dir/stan",
+                                 STAN_cores     = 2,
+                                 STAN_bym_model = bym2_stan)
+    
+    res_CARBayes  <- smooth_rpkg(formula      = O ~ E + region_ID,
+                                 data         = shape_D@data,
+                                 shapefile    = shape_D,
+                                 INLA_model   = "bym2",
+                                 STAN_dir     = STAN_dir,
+                                 STAN_cores   = 2,
+                                 time_scaling = 1)
+
+```
+
+## Summarizing BYM results
+We wrote a postestimation function that evaluates the average error and coverage. Calling these, we get
+```{r BYMpostest, cache=TRUE}
+    a <- summarize_BYMresult(estimation_tbl = shape_D@data,
+                             simulation_tbl = res_INLA_bym1$sRR,
+                             method_name    = "INLA-BYM",
+                             duration       = res_INLA_bym1$duration,
+                             region         = running_param$region,
+                             n              = running_param$n,
+                             ID             = running_param$ID,
+                             seed_risk      = running_param$seed_risk,
+                             seed_poisson   = running_param$seed_poisson,
+                             n_convolution  = running_param$n_convolution,
+                             rate_per_100k  = running_param$rate_per_100k)
+    b <- summarize_BYMresult(estimation_tbl = shape_D@data,
+                             simulation_tbl = res_INLA_bym2$sRR,
+                             method_name    = "INLA-BYM2",
+                             duration       = res_INLA_bym2$duration,
+                             region         = running_param$region,
+                             n              = running_param$n,
+                             ID             = running_param$ID,
+                             seed_risk      = running_param$seed_risk,
+                             seed_poisson   = running_param$seed_poisson,
+                             n_convolution  = running_param$n_convolution,
+                             rate_per_100k  = running_param$rate_per_100k)
+    c <- summarize_BYMresult(estimation_tbl = shape_D@data,
+                             simulation_tbl = res_BUGS_bym$sRR,
+                             method_name    = "OpenBUGS",
+                             duration       = res_BUGS_bym$duration,
+                             region         = running_param$region,
+                             n              = running_param$n,
+                             ID             = running_param$ID,
+                             seed_risk      = running_param$seed_risk,
+                             seed_poisson   = running_param$seed_poisson,
+                             n_convolution  = running_param$n_convolution,
+                             rate_per_100k  = running_param$rate_per_100k)
+  d  <- summarize_BYMresult(estimation_tbl = shape_D@data,
+                            simulation_tbl = res_STAN_bym$sRR,
+                            method_name    = "Rstan-BYM",
+                            duration       = res_STAN_bym$duration,
+                            region         = running_param$region,
+                            n              = running_param$n,
+                            ID             = running_param$ID,
+                            seed_risk      = running_param$seed_risk,
+                            seed_poisson   = running_param$seed_poisson,
+                            n_convolution  = running_param$n_convolution,
+                            rate_per_100k  = running_param$rate_per_100k)
+
+  e  <- summarize_BYMresult(estimation_tbl = shape_D@data,
+                            simulation_tbl = res_STAN_bym2$sRR,
+                            method_name    = "Rstan-BYM2",
+                            duration       = res_STAN_bym2$duration,
+                            region         = running_param$region,
+                            n              = running_param$n,
+                            ID             = running_param$ID,
+                            seed_risk      = running_param$seed_risk,
+                            seed_poisson   = running_param$seed_poisson,
+                            n_convolution  = running_param$n_convolution,
+                            rate_per_100k  = running_param$rate_per_100k)
+    f <- summarize_BYMresult(estimation_tbl = shape_D@data,
+                             simulation_tbl = res_CARBayes$sRR,
+                             method_name    = "CARBayes",
+                             duration       = res_CARBayes$duration,
+                             region         = running_param$region,
+                             n              = running_param$n,
+                             ID             = running_param$ID,
+                             seed_risk      = running_param$seed_risk,
+                             seed_poisson   = running_param$seed_poisson,
+                             n_convolution  = running_param$n_convolution,
+                             rate_per_100k  = running_param$rate_per_100k)
+
+    summarized_result <- (do.call(what = rbind,
+                                  args = list(a, b, c, d, e, f)))
+```
+
+```{r calcout, results = "asis"}
+    knitr::kable(t(summarized_result))
+```
+
